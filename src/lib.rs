@@ -14,14 +14,19 @@ pub struct RustEmbeddedHal<'a> {
 #[derive(Debug)]
 struct Var {
     name: String,
-    datatype: String
+    datatype: String,
+    desc: Option<String>
 }
 
 impl Var {
-    fn new(name: impl Into<String>, datatype: impl Into<String>) -> Var {
+    fn new(name: impl Into<String>, datatype: impl Into<String>, doc: Option<impl Into<String>>) -> Var {
         Var {
             name: name.into(),
-            datatype: datatype.into()
+            datatype: datatype.into(),
+            desc: match doc {
+                Some(s) => Some(s.into()),
+                None => None
+            }
         }
     }
 }
@@ -131,22 +136,42 @@ impl<'a> RustEmbeddedHal<'a> {
     }
 
     /// Codegens a payload for tx
-    fn codegen_out_payload(&self, name: &str, load: Payload) -> CodeChunk {
+    fn codegen_out_payload(&self, name: &str, load: Payload) -> CodeChunk { // rust UART i2c
         let mut inputs = Vec::<Var>::new();
         let outputs = Vec::<Var>::new();
 
         let mut seg_writes = String::new();
         for segment in load.segments {
-            let out_seg = self.codegen_out_segment(segment);
+            let out_seg = self.codegen_out_segment(&segment);
             seg_writes.push_str(TABULATION);
-            let indented_seg_write = out_seg.data.split("\n").collect::<Vec<_>>().join(&format!("\n{}", TABULATION));
+            let indented_seg_write = out_seg.data.replace("\n", &format!("\n{}", TABULATION));
             seg_writes.push_str(&indented_seg_write);
-
             inputs.extend(out_seg.inputs.into_iter());
+
         }
+        
+        let mut input_docs = String::new();
+        for input in &inputs {
+            let description = match &input.desc {
+                Some(desc) => desc.split("\n").map(|dl| dl.escape_default().to_string()).collect::<Vec<String>>().join("\n///  "),
+                None => continue
+            }; //refactor to map
+
+            input_docs.push_str(&format!("/// * `{name}` - {desc}", name = input.name, desc = description))
+        }
+
+        let docs = formatdoc!(
+            "
+            /// {payload_desc}
+            {input_docs}
+            ",
+            payload_desc = load.description.replace("\n", "\n///")
+
+            );
 
         let code = formatdoc!(
             "
+            /// {docs}
             fn {payload_name}({args}) {{
             {seg_writes}
             }}
@@ -163,24 +188,25 @@ impl<'a> RustEmbeddedHal<'a> {
     }
 
     /// Codegens a PacketSegment for transmission
-    fn codegen_out_segment(&self, seg: PacketSegment) -> CodeChunk {
+    fn codegen_out_segment(&self, seg: &PacketSegment) -> CodeChunk {
 
         let mut inputs = Vec::<Var>::new();
         let outputs = Vec::<Var>::new();
         let mut code = String::new(); 
 
         match seg {
-            PacketSegment::Sized { name, bits, datatype, description: _ } => {
+            PacketSegment::Sized { name, bits, datatype, description } => {
+
                 //TODO: actual read/write interface
                 match datatype {
                     SizedDataType::Raw => {
-                        inputs.push(Var::new(&name, format!("&[u8; {}]", if bits%8 == 0 { bits/8 } else { bits/8 + 1 } )));
+                        inputs.push(Var::new(name, format!("&[u8; {}]", if bits%8 == 0 { bits/8 } else { bits/8 + 1 } ), description.as_ref()));
                         code.push_str(&format!("write({name})\n", 
                                       name = name.escape_default()
                                       ))
                     },
                     SizedDataType::Const { data } => {
-                        if bits as usize != data.len() * 8 {
+                        if *bits as usize != data.len() * 8 {
                             unimplemented!("Not integral number of bytes for const values not yet supported");
                         }
 
@@ -194,16 +220,16 @@ impl<'a> RustEmbeddedHal<'a> {
                         ))
                     },
                     SizedDataType::Integer { endianness, signing } => {
-                        if bits != 8 && bits != 16 && bits != 32 && bits != 64 {
+                        if *bits != 8 && *bits != 16 && *bits != 32 && *bits != 64 {
                             unimplemented!("Codegen for rust don't yet handle non-standard length integers.")
                         }
                         
 
-                        inputs.push(Var::new(&name, format!("{}{}", match signing {
+                        inputs.push(Var::new(name, format!("{}{}", match signing {
                             Signing::Unsigned => "u",
                             Signing::TwosComplement => "i",
                             Signing::OnesComplement => unimplemented!("One's complement not yet implemented")
-                        }, bits)));
+                        }, bits), description.as_ref()));
 
                         // to get one's complement, take the absolute value, and set the highest
                         // bit if it was negative
@@ -220,7 +246,9 @@ impl<'a> RustEmbeddedHal<'a> {
                                 ))
                     },
                     SizedDataType::StringUTF8 => {
-                        inputs.push(Var::new(&name, format!("&str")));
+                        inputs.push(Var::new(name, format!("&str"), description.as_ref()));
+                        //TODO: enforce size constraint in generated code, what if someone sends a
+                        //too-big or too-small &str? ideally at comptime
 
                         // no partial string writes
                         assert!(bits % 8 == 0);
@@ -236,7 +264,7 @@ impl<'a> RustEmbeddedHal<'a> {
                     }
                 }
             },
-            PacketSegment::Unsized { name, datatype, termination, description: _ } => {
+            PacketSegment::Unsized { name, datatype, termination, description } => {
                 unimplemented!("Unsized data not yet supported")
             }
             PacketSegment::Struct { name, struct_name } => {
