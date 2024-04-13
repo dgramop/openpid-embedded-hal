@@ -81,7 +81,7 @@ checksum = "6c8640c5d730cb13ebd907d8d04b52f55ac9a2eec55b440c8892f40d56c76c1d"
 [[package]]
 name = "openpid"
 version = "0.1.0"
-source = "git+ssh://git@github.com/dgramop/openpid#e3504608b21a98621a464cecce2563dd0e5c11d9"
+source = "git+ssh://git@github.com/dgramop/openpid#4ffe54d8e3b78083b59c773c762ef52c4cd10f85"
 dependencies = [
  "derive_more",
  "rand",
