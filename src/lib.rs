@@ -3,7 +3,7 @@ use openpid::prelude::*;
 use openpid::{CodegenError, config::OpenPID};
 use std::fs;
 
-const TABULATION: &str = "    ";
+const TAB: &str = "    ";
 
 #[derive(Debug)]
 pub struct RustEmbeddedHal<'a> {
@@ -11,7 +11,7 @@ pub struct RustEmbeddedHal<'a> {
     target: std::path::PathBuf
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Var {
     name: String,
     datatype: String,
@@ -87,7 +87,9 @@ impl<'a> RustEmbeddedHal<'a> {
 
         [dependencies]
         embedded_hal = \"1\"
-        openpid = {{ git = \"ssh://git@github.com/dgramop/openpid\", features = [\"types\"] }}
+
+        # For serial/UART stream representation
+        embedded-io = \"0.6.1\"
         ", 
         name = self.pid.device_info.name.escape_default(),
         version = version.escape_default(),
@@ -100,34 +102,25 @@ impl<'a> RustEmbeddedHal<'a> {
         #[no_std]
 
         extern crate embedded_hal;
-        extern crate openpid;
-
-        use openpid::{{PacketSegment, SizedDataType, UnsizedDataType}};
-
-        // TODO: just pull types from UnsizedDataType/SizedDataType. Maybe we need another crate
-        // called openpid_types
-        pub enum EmbeddedType {{
-            Sized(SizedDataType),
-            Unsized(UnsizedDataType)
-        }}
+        extern crate embedded_io;
 
         struct BitStream {{
-            /// Underlying byte stream
-            stream: todo!(),
+        {TAB}/// Underlying byte stream
+        {TAB}stream: todo!(),
 
-            /// Stores bits if a non-byte-aligned read/write occurs, for future reading/writing
-            leftover: u8
+        {TAB}/// Stores bits if a non-byte-aligned read/write occurs, for future reading/writing
+        {TAB}leftover: u8
         }}
 
         /// Reads the given type from the bit stream
         pub trait<Underlying, const S: PacketSegment> Get<T> {{
-            fn get(stream: BitStream) -> T;
+        {TAB}fn get(stream: BitStream) -> T;
         }}
 
         /// Writes the given type to the bit stream
         pub trait<Underlying, const S: PacketSegment> Put<Underlying, const ET: EmbeddedType> {{
-            /// Returns the number of bits written
-            fn put(steam: BitStream) -> usize;
+        {TAB}/// Returns the number of bits written
+        {TAB}fn put(steam: BitStream) -> usize;
         }}
 
         "))?;
@@ -136,15 +129,15 @@ impl<'a> RustEmbeddedHal<'a> {
     }
 
     /// Codegens a payload for tx
-    fn codegen_out_payload(&self, name: &str, load: Payload) -> CodeChunk { // rust UART i2c
+    fn codegen_out_payload(&self, name: &str, load: Payload) -> Result<CodeChunk, CodegenError> { // rust UART i2c
         let mut inputs = Vec::<Var>::new();
         let outputs = Vec::<Var>::new();
 
         let mut seg_writes = String::new();
         for segment in load.segments {
-            let out_seg = self.codegen_out_segment(&segment);
-            seg_writes.push_str(TABULATION);
-            let indented_seg_write = out_seg.data.replace("\n", &format!("\n{}", TABULATION));
+            let out_seg = self.codegen_out_segment(name, &segment, None)?;
+            seg_writes.push_str(TAB);
+            let indented_seg_write = out_seg.data.replace("\n", &format!("\n{}", TAB));
             seg_writes.push_str(&indented_seg_write);
             inputs.extend(out_seg.inputs.into_iter());
 
@@ -184,15 +177,63 @@ impl<'a> RustEmbeddedHal<'a> {
                                      ).collect::<Vec<_>>().join(", ")
             );
 
-        CodeChunk { data: code, inputs, outputs }
+        Ok(CodeChunk { data: code, inputs, outputs })
+    }
+
+    fn codegen_struct(&self, struct_name: &str, rs: &ReusableStruct) -> Result<CodeChunk, CodegenError> {
+        let fields = Vec::new();
+
+        let desc = match &rs.description {
+            Some(desc) => format!("///{}", desc.split("\n").map(|f| f.escape_default().to_string()).collect::<Vec<String>>().join("\n///")),
+            None => "".to_owned()
+        };
+
+        let code = formatdoc!(
+            "
+            {desc}
+            struct {struct_name} {{
+            {TAB}//TODO: vars
+            }}
+            ",
+            struct_name = struct_name.escape_default()
+            );
+
+        todo!();
+        Ok(CodeChunk { data: code, inputs: fields.clone(), outputs: fields })
     }
 
     /// Codegens a PacketSegment for transmission
-    fn codegen_out_segment(&self, seg: &PacketSegment) -> CodeChunk {
+    ///
+    /// # Arguments
+    /// * `source_name` - Name of the payload or struct this segment is a part of
+    /// * `seg` - The packet segment to generate a write for
+    /// * `struct_config` - If this segment came from a Struct, informs codegen of how to generate
+    /// the given writes
+    fn codegen_out_segment(&self, payload_name: &str, seg: &PacketSegment, struct_config: Option<&ReusableStruct>) -> Result<CodeChunk, CodegenError> {
 
         let mut inputs = Vec::<Var>::new();
         let outputs = Vec::<Var>::new();
         let mut code = String::new(); 
+
+        let spacing = TAB;
+
+        // tells the rest of the code to prefix input variables with a given prefix, for example 
+        // if the data we're interested in is contained within a struct instance
+        let prefix = match struct_config {
+            Some(ReusableStruct {name, fields:_, description}) => {
+                // since we are codegenning for the contents of an input struct, we depend on that
+                // struct
+                inputs.push(Var {
+                    name: name.clone(),
+                    datatype: name.to_owned(), //TODO: to camel case? need a way to convert rs_name
+                                               //into a rust name
+                    desc: description.to_owned()
+                });
+
+                format!("{name}.")
+            },
+            None => "".to_owned()
+        };
 
         match seg {
             PacketSegment::Sized { name, bits, datatype, description } => {
@@ -200,10 +241,11 @@ impl<'a> RustEmbeddedHal<'a> {
                 //TODO: actual read/write interface
                 match datatype {
                     SizedDataType::Raw => {
-                        inputs.push(Var::new(name, format!("&[u8; {}]", if bits%8 == 0 { bits/8 } else { bits/8 + 1 } ), description.as_ref()));
-                        code.push_str(&format!("write({name})\n", 
-                                      name = name.escape_default()
-                                      ))
+                        let var = Var::new(format!("{prefix}{name}"), format!("&[u8; {}]", if bits%8 == 0 { bits/8 } else { bits/8 + 1 } ), description.as_ref());
+                        code.push_str(&format!("{spacing}write({var})\n", 
+                                      var = &var.name
+                                      ));
+                        inputs.push(var);
                     },
                     SizedDataType::Const { data } => {
                         if *bits as usize != data.len() * 8 {
@@ -212,8 +254,8 @@ impl<'a> RustEmbeddedHal<'a> {
 
                         code.push_str(&formatdoc!(
                         "
-                        // {name}
-                        write([{data}]);
+                        {spacing}// {name}
+                        {spacing}write([{data}]);
                         ", 
                         data = data.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(", "),
                         name = name.escape_default()
@@ -224,29 +266,30 @@ impl<'a> RustEmbeddedHal<'a> {
                             unimplemented!("Codegen for rust don't yet handle non-standard length integers.")
                         }
                         
-
-                        inputs.push(Var::new(name, format!("{}{}", match signing {
+                        let var = Var::new(format!("{prefix}{name}"), format!("{}{}", match signing {
                             Signing::Unsigned => "u",
                             Signing::TwosComplement => "i",
                             Signing::OnesComplement => unimplemented!("One's complement not yet implemented")
-                        }, bits), description.as_ref()));
+                        }, bits), description.as_ref());
+
 
                         // to get one's complement, take the absolute value, and set the highest
                         // bit if it was negative
-
                         code.push_str(&formatdoc!(
                                 "
-                                write({name}.{bytes_function})
+                                {spacing}write({var}.{bytes_function}())
                                 ",
-                                name = name.escape_default(),
+                                var = &var.name,
                                 bytes_function = match endianness {
                                     Endianness::BigEndian => "to_be_bytes",
                                     Endianness::LittleEndian => "to_le_bytes",
                                 }
-                                ))
+                                ));
+
+                        inputs.push(var);
                     },
                     SizedDataType::StringUTF8 => {
-                        inputs.push(Var::new(name, format!("&str"), description.as_ref()));
+                        let var = Var::new(format!("{prefix}{name}"), format!("&str"), description.as_ref());
                         //TODO: enforce size constraint in generated code, what if someone sends a
                         //too-big or too-small &str? ideally at comptime
 
@@ -255,25 +298,58 @@ impl<'a> RustEmbeddedHal<'a> {
 
                         code.push_str(&formatdoc!(
                                 "
-                                write({name}.as_bytes())
+                                {spacing}write({var}.as_bytes())
                                 ",
-                                name = name.escape_default()))
+                                var = var.name));
+
+                        inputs.push(var);
                     },
                     SizedDataType::FloatIEEE { endianness } => {
-                        unimplemented!("Floating point numbers not yet supported")
+                        if *bits != 32 && *bits != 64 {
+                            unimplemented!("only IEEE 32 and 64 bit floats currently supported")
+                        }
+                        let var = Var::new(name, format!("f{}",bits), description.as_ref());
+
+                        code.push_str(&formatdoc!(
+                                "
+                                {spacing}write({var}.{bytes_function}())
+                                ",
+                                var = var.name,
+                                bytes_function = match endianness {
+                                    Endianness::BigEndian => "to_be_bytes",
+                                    Endianness::LittleEndian => "to_le_bytes",
+                                }
+                                ));
+
+                        inputs.push(var);
                     }
                 }
             },
             PacketSegment::Unsized { name, datatype, termination, description } => {
+                match datatype {
+                    UnsizedDataType::Array { item_struct } => {
+                    },
+                    UnsizedDataType::StringUTF8 => {
+                    },
+                    UnsizedDataType::Raw => {
+                    }
+                }
                 unimplemented!("Unsized data not yet supported")
             }
             PacketSegment::Struct { name, struct_name } => {
+                let reusable_struct = match self.pid.structs.get(name) {
+                    Some(rs) => rs,
+                    None => {
+                        return Err(CodegenError::NoStruct { wanted_by_payload: payload_name.to_string(), wanted_by_field: name.clone(), struct_name: struct_name.clone() });
+                    }
+                };
+                //TODO: add struct as input!
                 // lookup the struct and recurse
                 unimplemented!("Struct referencing not yet supported")
             }
         };
 
-        return CodeChunk { data: code, inputs, outputs };
+        Ok(CodeChunk { data: code, inputs, outputs })
     }
 }
 
