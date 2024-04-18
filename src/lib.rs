@@ -211,8 +211,9 @@ impl<'a> RustEmbeddedHal<'a> {
     /// the given writes
     fn codegen_out_segment(&self, payload_name: &str, seg: &PacketSegment, struct_config: Option<&ReusableStruct>) -> Result<CodeChunk, CodegenError> {
 
+        //TODO: dedup, probably make this into a btreeset
         let mut inputs = Vec::<Var>::new();
-        let outputs = Vec::<Var>::new();
+        let mut outputs = Vec::<Var>::new();
         let mut code = String::new(); 
 
         let spacing = TAB;
@@ -343,9 +344,15 @@ impl<'a> RustEmbeddedHal<'a> {
                         return Err(CodegenError::NoStruct { wanted_by_payload: payload_name.to_string(), wanted_by_field: name.clone(), struct_name: struct_name.clone() });
                     }
                 };
-                //TODO: add struct as input!
-                // lookup the struct and recurse
-                unimplemented!("Struct referencing not yet supported")
+
+                //TODO: struct datatype
+                inputs.push(Var::new(struct_name, struct_name, reusable_struct.description.clone()));
+                for seg in &reusable_struct.fields {
+                    let genned = self.codegen_out_segment(payload_name, seg, struct_config)?;
+                    code.push_str(&genned.data);
+                    inputs.extend(genned.inputs.into_iter());
+                    outputs.extend(genned.outputs.into_iter());
+                }
             }
         };
 
