@@ -1,3 +1,4 @@
+use convert_case::Casing;
 use indoc::formatdoc;
 use openpid::prelude::*;
 use openpid::{CodegenError, config::OpenPID};
@@ -180,6 +181,11 @@ impl<'a> RustEmbeddedHal<'a> {
         Ok(CodeChunk { data: code, inputs, outputs })
     }
 
+    // Converts a ReusableStruct to a struct name
+    fn get_struct_datatype(&self, struct_name: &str) -> String {
+        struct_name.from_case(convert_case::Case::Snake).to_case(convert_case::Case::UpperCamel)
+    }
+
     fn codegen_struct(&self, struct_name: &str, rs: &ReusableStruct) -> Result<CodeChunk, CodegenError> {
         let fields = Vec::new();
 
@@ -191,11 +197,11 @@ impl<'a> RustEmbeddedHal<'a> {
         let code = formatdoc!(
             "
             {desc}
-            struct {struct_name} {{
+            struct {name} {{
             {TAB}//TODO: vars
             }}
             ",
-            struct_name = struct_name.escape_default()
+            name = self.get_struct_datatype(struct_name)
             );
 
         todo!();
@@ -346,7 +352,7 @@ impl<'a> RustEmbeddedHal<'a> {
                 };
 
                 //TODO: struct datatype
-                inputs.push(Var::new(struct_name, struct_name, reusable_struct.description.clone()));
+                inputs.push(Var::new(struct_name, self.get_struct_datatype(struct_name), reusable_struct.description.clone()));
                 for seg in &reusable_struct.fields {
                     let genned = self.codegen_out_segment(payload_name, seg, struct_config)?;
                     code.push_str(&genned.data);
